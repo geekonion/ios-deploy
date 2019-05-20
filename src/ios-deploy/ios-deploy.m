@@ -93,6 +93,7 @@ int _detectDeadlockTimeout = 0;
 bool _json_output = false;
 int port = 0;    // 0 means "dynamically assigned"
 CFStringRef last_path = NULL;
+int lastOutPercent = 0;
 service_conn_t gdbfd;
 pid_t parent = 0;
 // PID of child process running lldb
@@ -364,7 +365,8 @@ CFStringRef get_device_full_name(const AMDeviceRef device) {
     NSLogVerbose(@"Architecture Name: %@", arch_name);
 
     if (device_name != NULL) {
-        full_name = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@ (%@, %@, %@, %@) a.k.a. '%@'"), device_udid, model, model_name, sdk_name, arch_name, device_name);
+//        full_name = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@ (%@, %@, %@, %@) a.k.a. '%@'"), device_udid, model, model_name, sdk_name, arch_name, device_name);
+        full_name = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@ (%@)"), device_udid, model_name);
     } else {
         full_name = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@ (%@, %@, %@, %@)"), device_udid, model, model_name, sdk_name, arch_name);
     }
@@ -564,9 +566,19 @@ mach_error_t transfer_callback(CFDictionaryRef dict, int arg) {
 
     if (CFEqual(status, CFSTR("CopyingFile"))) {
         CFStringRef path = CFDictionaryGetValue(dict, CFSTR("Path"));
-
-        if ((last_path == NULL || !CFEqual(path, last_path)) && !CFStringHasSuffix(path, CFSTR(".ipa"))) {
-            NSLogOut(@"[%3d%%] Copying %@ to device", percent / 2, path);
+        
+        if (verbose) {
+            if ((last_path == NULL || !CFEqual(path, last_path)) && !CFStringHasSuffix(path, CFSTR(".ipa"))) {
+                NSLogOut(@"[%3d%%] Copying %@ to device", percent / 2, path);
+            }
+        } else {
+            if (!CFStringHasSuffix(path, CFSTR(".ipa")) && !CFStringHasSuffix(path, CFSTR(".png"))) {
+                int outPercent = percent / 2;
+                if (lastOutPercent != outPercent && outPercent % 5 == 0) {
+                    lastOutPercent = outPercent;
+                    NSLogOut(@"[%3d%%] Copying %@ to device", outPercent, path);
+                }
+            }
         }
 
         if (last_path != NULL) {
@@ -1660,7 +1672,8 @@ void handle_device(AMDeviceRef device) {
 
     if(install) {
         NSLogOut(@"------ Install phase ------");
-        NSLogOut(@"[  0%%] Found %@ connected through %@, beginning install", device_full_name, device_interface_name);
+//        NSLogOut(@"[  0%%] Found %@ connected through %@, beginning install", device_full_name, device_interface_name);
+        NSLogOut(@"[  0%%] beginning install through %@", device_interface_name);
 
         AMDeviceConnect(device);
         assert(AMDeviceIsPaired(device));
