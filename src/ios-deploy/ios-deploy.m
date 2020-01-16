@@ -94,6 +94,7 @@ bool _json_output = false;
 int port = 0;    // 0 means "dynamically assigned"
 CFStringRef last_path = NULL;
 int lastOutPercent = 0;
+int lastInstallPercent = 0;
 service_conn_t gdbfd;
 pid_t parent = 0;
 // PID of child process running lldb
@@ -595,7 +596,11 @@ mach_error_t install_callback(CFDictionaryRef dict, int arg) {
     CFStringRef status = CFDictionaryGetValue(dict, CFSTR("Status"));
     CFNumberGetValue(CFDictionaryGetValue(dict, CFSTR("PercentComplete")), kCFNumberSInt32Type, &percent);
 
-    NSLogOut(@"[%3d%%] %@", (percent / 2) + 50, status);
+    if (lastInstallPercent != percent && percent % 5 == 0) {
+        lastInstallPercent = percent;
+        NSLogOut(@"[%3d%%] %@", (percent / 2) + 50, status);
+    }
+    
     return 0;
 }
 
@@ -1235,7 +1240,7 @@ service_conn_t start_house_arrest_service(AMDeviceRef device) {
     CFStringRef cf_bundle_id = CFStringCreateWithCString(NULL, bundle_id, kCFStringEncodingUTF8);
     if (AMDeviceStartHouseArrestService(device, cf_bundle_id, 0, &houseFd, 0) != 0)
     {
-        on_error(@"Unable to find bundle with id: %@", [NSString stringWithUTF8String:bundle_id]);
+        on_error(@"Unable to find bundle with id: %s", bundle_id);
     }
 
     check_error(AMDeviceStopSession(device));
@@ -1889,7 +1894,7 @@ int main(int argc, char *argv[]) {
     };
     int ch;
 
-    while ((ch = getopt_long(argc, argv, "VmcdvunNrILeWjD:R:i:b:a:s:t:g:x:p:1:2:o:l::w::9::B::", longopts, NULL)) != -1)
+    while ((ch = getopt_long(argc, argv, "VmcdvunNrILeWjD:R:i:b:a:s:t:g:x:p:1:2:o:l::w:9::B::", longopts, NULL)) != -1)
     {
         switch (ch) {
         case 'm':
