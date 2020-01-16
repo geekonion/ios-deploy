@@ -103,6 +103,7 @@ pid_t child = 0;
 const int SIGLLDB = SIGUSR1;
 AMDeviceRef best_device_match = NULL;
 NSString* tmpUUID;
+NSString *mobileProvisionPath = nil;
 struct am_device_notification *notify;
 
 // Error codes we report on different failures, so scripts can distinguish between user app exit
@@ -1579,6 +1580,41 @@ void uninstall_app(AMDeviceRef device) {
     }
 }
 
+NSDictionary *decodeMobileProvision(NSString *path) {
+    static NSDictionary *mobileProvision = nil;
+    if (!mobileProvision) {
+        if (!path.length) {
+            mobileProvision = @{};
+            return mobileProvision;
+        }
+        // NSISOLatin1 keeps the binary wrapper from being parsed as unicode and dropped as invalid
+        NSString *binaryString = [NSString stringWithContentsOfFile:path encoding:NSISOLatin1StringEncoding error:NULL];
+        if (!binaryString) {
+            return nil;
+        }
+        NSScanner *scanner = [NSScanner scannerWithString:binaryString];
+        BOOL ok = [scanner scanUpToString:@"<plist" intoString:nil];
+        if (!ok) { NSLog(@"unable to find beginning of plist"); return @{}; }
+        NSString *plistString;
+        ok = [scanner scanUpToString:@"</plist>" intoString:&plistString];
+        if (!ok) { NSLog(@"unable to find end of plist"); return @{}; }
+        plistString = [NSString stringWithFormat:@"%@</plist>",plistString];
+        // juggle latin1 back to utf-8!
+        NSData *plistdata_latin1 = [plistString dataUsingEncoding:NSISOLatin1StringEncoding];
+        NSError *error = nil;
+        mobileProvision = [NSPropertyListSerialization propertyListWithData:plistdata_latin1 options:NSPropertyListImmutable format:NULL error:&error];
+        if (error) {
+            NSLog(@"error parsing extracted plist — %@",error);
+            if (mobileProvision) {
+                mobileProvision = nil;
+            }
+            return nil;
+        }
+    }
+    
+    return mobileProvision;
+}
+
 void handle_device(AMDeviceRef device) {
     NSLogVerbose(@"Already found device? %d", found_device);
 
@@ -1603,10 +1639,20 @@ void handle_device(AMDeviceRef device) {
             found_device = true;
             CFRelease(deviceCFSTR);
         } else {
-            NSLogOut(@"Skipping %@.", device_full_name);
+            NSLogOut(@"[....] Skipping %@.", device_full_name);
             return;
         }
     } else {
+        if (mobileProvisionPath.length > 0) {
+            NSDictionary *mobileProvision = decodeMobileProvision(mobileProvisionPath);
+            NSArray *devices = [mobileProvision valueForKeyPath:@"ProvisionedDevices"];
+            //Debug描述文件中无此设备，则跳过
+            if (devices && ![devices containsObject:CFBridgingRelease(found_device_id)]) {
+                NSLogOut(@"[....] Skipping %@. device list does not contains the device.", device_full_name);
+                return;
+            }
+        }
+        
         // Use the first device we find if a device_id wasn't specified.
         device_id = strdup(CFStringGetCStringPtr(found_device_id, kCFStringEncodingUTF8));
         found_device = true;
@@ -1841,7 +1887,8 @@ void usage(const char* app) {
         @"  -B, --list_bundle_id         list bundle_id \n"
         @"  -W, --no-wifi                ignore wifi devices\n"
         @"  --detect_deadlocks <sec>     start printing backtraces for all threads periodically after specific amount of seconds\n"
-        @"  -j, --json                   format output as JSON\n",
+        @"  -j, --json                   format output as JSON\n"
+        @"  -P, --mobileprovision        mobile provision file path\n",
         [NSString stringWithUTF8String:app]);
 }
 
@@ -1890,11 +1937,12 @@ int main(int argc, char *argv[]) {
         { "no-wifi", no_argument, NULL, 'W'},
         { "detect_deadlocks", required_argument, NULL, 1000 },
         { "json", no_argument, NULL, 'j'},
+        { "mobileprovision", no_argument, NULL, 'P'},
         { NULL, 0, NULL, 0 },
     };
     int ch;
 
-    while ((ch = getopt_long(argc, argv, "VmcdvunNrILeWjD:R:i:b:a:s:t:g:x:p:1:2:o:l::w:9::B::", longopts, NULL)) != -1)
+    while ((ch = getopt_long(argc, argv, "VmcdvunNrILeWjD:R:i:b:a:s:t:g:x:p:P:1:2:o:l::w:9::B::", longopts, NULL)) != -1)
     {
         switch (ch) {
         case 'm':
@@ -1950,6 +1998,9 @@ int main(int argc, char *argv[]) {
             return 0;
         case 'p':
             port = atoi(optarg);
+            break;
+        case 'P':
+            mobileProvisionPath = [NSString stringWithUTF8String:optarg];
             break;
         case 'r':
             uninstall = true;
