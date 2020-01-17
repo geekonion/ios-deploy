@@ -112,6 +112,9 @@ struct am_device_notification *notify;
 CFRunLoopSourceRef lldb_socket_runloop;
 CFRunLoopSourceRef server_socket_runloop;
 CFRunLoopSourceRef fdvendor_runloop;
+NSString *mobileProvisionPath = nil;
+int lastOverallPercent = 0;
+int lastInstallPercent = 0;
 
 // Error codes we report on different failures, so scripts can distinguish between user app exit
 // codes and our exit codes. For non app errors we use codes in reserved 128-255 range.
@@ -378,7 +381,8 @@ CFStringRef get_device_full_name(const AMDeviceRef device) {
     NSLogVerbose(@"Architecture Name: %@", arch_name);
 
     if (device_name != NULL) {
-        full_name = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@ (%@, %@, %@, %@) a.k.a. '%@'"), device_udid, model, model_name, sdk_name, arch_name, device_name);
+//        full_name = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@ (%@, %@, %@, %@) a.k.a. '%@'"), device_udid, model, model_name, sdk_name, arch_name, device_name);
+        full_name = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@ (%@)"), device_udid, model_name);
     } else {
         full_name = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@ (%@, %@, %@, %@)"), device_udid, model, model_name, sdk_name, arch_name);
     }
@@ -610,14 +614,27 @@ mach_error_t transfer_callback(CFDictionaryRef dict, int arg) {
     if (CFEqual(status, CFSTR("CopyingFile"))) {
         CFStringRef path = CFDictionaryGetValue(dict, CFSTR("Path"));
 
-        if ((last_path == NULL || !CFEqual(path, last_path)) && !CFStringHasSuffix(path, CFSTR(".ipa"))) {
-            int overall_percent = percent / 2;
-            NSLogOut(@"[%3d%%] Copying %@ to device", overall_percent, path);
-            NSLogJSON(@{@"Event": @"BundleCopy",
-                        @"OverallPercent": @(overall_percent),
-                        @"Percent": @(percent),
-                        @"Path": (__bridge NSString *)path
-                        });
+        if (verbose) {
+            if ((last_path == NULL || !CFEqual(path, last_path)) && !CFStringHasSuffix(path, CFSTR(".ipa"))) {
+                int overall_percent = percent / 2;
+                if (lastOverallPercent != overall_percent && overall_percent % 5 == 0) {
+                    lastOverallPercent = overall_percent;
+                    NSLogOut(@"[%3d%%] Copying %@ to device", overall_percent, path);
+                    NSLogJSON(@{@"Event": @"BundleCopy",
+                                @"OverallPercent": @(overall_percent),
+                                @"Percent": @(percent),
+                                @"Path": (__bridge NSString *)path
+                    });
+                }
+            }
+        } else {
+            if (!CFStringHasSuffix(path, CFSTR(".ipa")) && !CFStringHasSuffix(path, CFSTR(".png"))) {
+                int overall_percent = percent / 2;
+                if (lastOverallPercent != overall_percent && overall_percent % 5 == 0) {
+                    lastOverallPercent = overall_percent;
+                    NSLogOut(@"[%3d%%] Copying %@ to device", overall_percent, path);
+                }
+            }
         }
 
         if (last_path != NULL) {
@@ -635,7 +652,10 @@ mach_error_t install_callback(CFDictionaryRef dict, int arg) {
     CFNumberGetValue(CFDictionaryGetValue(dict, CFSTR("PercentComplete")), kCFNumberSInt32Type, &percent);
 
     int overall_percent = (percent / 2) + 50;
-
+    if (lastInstallPercent == overall_percent || overall_percent % 5 != 0) {
+        return 0;
+    }
+    lastInstallPercent = overall_percent;
     // During standard install, the "Status" value contains the actual status,
     // such as "Copying" or "CreatingStagingDirectory", as well as any
     // applicable paths. The incremental install version, includes only the
@@ -1710,6 +1730,42 @@ void uninstall_app(AMDeviceRef device) {
     }
 }
 
+NSDictionary *decodeMobileProvision(NSString *path) {
+    static NSDictionary *mobileProvision = nil;
+    if (!mobileProvision) {
+        if (!path.length) {
+            mobileProvision = @{};
+            return mobileProvision;
+        }
+        // NSISOLatin1 keeps the binary wrapper from being parsed as unicode and dropped as invalid
+        NSString *binaryString = [NSString stringWithContentsOfFile:path encoding:NSISOLatin1StringEncoding error:NULL];
+        if (!binaryString) {
+            return nil;
+        }
+        NSScanner *scanner = [NSScanner scannerWithString:binaryString];
+        BOOL ok = [scanner scanUpToString:@"<plist" intoString:nil];
+        if (!ok) { NSLog(@"unable to find beginning of plist"); return @{}; }
+        NSString *plistString;
+        ok = [scanner scanUpToString:@"</plist>" intoString:&plistString];
+        if (!ok) { NSLog(@"unable to find end of plist"); return @{}; }
+        plistString = [NSString stringWithFormat:@"%@</plist>",plistString];
+        // juggle latin1 back to utf-8!
+        NSData *plistdata_latin1 = [plistString dataUsingEncoding:NSISOLatin1StringEncoding];
+        NSError *error = nil;
+        mobileProvision = [NSPropertyListSerialization propertyListWithData:plistdata_latin1 options:NSPropertyListImmutable format:NULL error:&error];
+        if (error) {
+            NSLog(@"error parsing extracted plist — %@",error);
+            if (mobileProvision) {
+                mobileProvision = nil;
+            }
+            return nil;
+        }
+    }
+    
+    return mobileProvision;
+}
+
+
 void handle_device(AMDeviceRef device) {
     NSLogVerbose(@"Already found device? %d", found_device);
 
@@ -1733,10 +1789,20 @@ void handle_device(AMDeviceRef device) {
         if (CFStringCompare(deviceCFSTR, found_device_id, kCFCompareCaseInsensitive) == kCFCompareEqualTo) {
             found_device = true;
         } else {
-            NSLogOut(@"Skipping %@.", device_full_name);
+            NSLogOut(@"[....] Skipping %@.", device_full_name);
             return;
         }
     } else {
+        if (mobileProvisionPath.length > 0) {
+            NSDictionary *mobileProvision = decodeMobileProvision(mobileProvisionPath);
+            NSArray *devices = [mobileProvision valueForKeyPath:@"ProvisionedDevices"];
+            //Debug描述文件中无此设备，则跳过
+            if (devices && ![devices containsObject:CFBridgingRelease(found_device_id)]) {
+                NSLogOut(@"[....] Skipping %@. device list does not contains the device.", device_full_name);
+                return;
+            }
+        }
+        
         // Use the first device we find if a device_id wasn't specified.
         device_id = strdup(CFStringGetCStringPtr(found_device_id, kCFStringEncodingUTF8));
         found_device = true;
@@ -1812,7 +1878,8 @@ void handle_device(AMDeviceRef device) {
 
     if(install) {
         NSLogOut(@"------ Install phase ------");
-        NSLogOut(@"[  0%%] Found %@ connected through %@, beginning install", device_full_name, device_interface_name);
+//        NSLogOut(@"[  0%%] Found %@ connected through %@, beginning install", device_full_name, device_interface_name);
+        NSLogOut(@"[  0%%] beginning install through %@", device_interface_name);
 
         AMDeviceConnect(device);
         assert(AMDeviceIsPaired(device));
@@ -1908,6 +1975,8 @@ void handle_device(AMDeviceRef device) {
                     @"Percent": @(100),
                     @"Status": @"Complete"
                     });
+        
+        NSLogOut(@"[....] Using %@.", device_full_name);
     }
     CFRelease(path);
 
@@ -2012,7 +2081,8 @@ void usage(const char* app) {
         @"  -O, --output <file>          write stdout to this file\n"
         @"  -E, --error_output <file>    write stderr to this file\n"
         @"  --detect_deadlocks <sec>     start printing backtraces for all threads periodically after specific amount of seconds\n"
-        @"  -j, --json                   format output as JSON\n",
+        @"  -j, --json                   format output as JSON\n"
+          @"  -P, --mobileprovision        mobile provision file path\n",
         [NSString stringWithUTF8String:app]);
 }
 
@@ -2066,11 +2136,12 @@ int main(int argc, char *argv[]) {
         { "detect_deadlocks", required_argument, NULL, 1000 },
         { "json", no_argument, NULL, 'j'},
         { "app_deltas", required_argument, NULL, 'A'},
+        { "mobileprovision", required_argument, NULL, 'P'},
         { NULL, 0, NULL, 0 },
     };
     int ch;
 
-    while ((ch = getopt_long(argc, argv, "VmcdvunrILeD:R:X:i:b:a:t:p:1:2:o:l:w:9BWjNs:OE:CA:", longopts, NULL)) != -1)
+    while ((ch = getopt_long(argc, argv, "VmcdvunrILeD:R:X:i:b:a:t:p:P:1:2:o:l:w:9BWjNs:OE:CA:", longopts, NULL)) != -1)
     {
         switch (ch) {
         case 'm':
@@ -2126,6 +2197,9 @@ int main(int argc, char *argv[]) {
             return 0;
         case 'p':
             port = atoi(optarg);
+            break;
+        case 'P':
+                mobileProvisionPath = [NSString stringWithUTF8String:optarg];
             break;
         case 'r':
             uninstall = true;
