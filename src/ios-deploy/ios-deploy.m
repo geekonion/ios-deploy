@@ -1353,7 +1353,7 @@ AFCConnectionRef start_house_arrest_service(AMDeviceRef device) {
     CFStringRef cf_bundle_id = CFStringCreateWithCString(NULL, bundle_id, kCFStringEncodingUTF8);
     if (AMDeviceCreateHouseArrestService(device, cf_bundle_id, 0, &conn) != 0)
     {
-        on_error(@"Unable to find bundle with id: %@", [NSString stringWithUTF8String:bundle_id]);
+        on_error(@"Unable to find bundle with id: %s", bundle_id);
     }
 
     check_error(AMDeviceStopSession(device));
