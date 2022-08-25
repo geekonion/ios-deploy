@@ -872,7 +872,7 @@ CFStringRef copy_disk_app_identifier(CFURLRef disk_app_url) {
     CFURLRef plist_url = CFURLCreateCopyAppendingPathComponent(NULL, disk_app_url, CFSTR("Info.plist"), false);
     CFReadStreamRef plist_stream = CFReadStreamCreateWithFile(NULL, plist_url);
     if (!CFReadStreamOpen(plist_stream)) {
-        on_error(@"Cannot read Info.plist file: %@", plist_url);
+        on_error(@"Cannot read Info.plist file: %@ %@", plist_url, CFReadStreamCopyError(plist_stream));
     }
 
     CFPropertyListRef plist = CFPropertyListCreateWithStream(NULL, plist_stream, 0, kCFPropertyListImmutable, NULL, NULL);
@@ -1509,6 +1509,9 @@ CFStringRef copy_bundle_id(CFURLRef app_url)
     if (CFReadStreamOpen(stream) == TRUE) {
         plist = CFPropertyListCreateWithStream(NULL, stream, 0,
                                                kCFPropertyListImmutable, NULL, NULL);
+    } else {
+        CFErrorRef error = CFReadStreamCopyError(stream);
+        NSLog(@"%@", error);
     }
     CFReadStreamClose(stream);
     CFRelease(stream);
